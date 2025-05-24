@@ -1,0 +1,115 @@
+import type { MetaFunction } from "@remix-run/react";
+import type { SeoConfig } from "@shopify/hydrogen";
+import { flattenConnection, getSeoMeta } from "@shopify/hydrogen";
+import { type LoaderFunctionArgs, data } from "@shopify/remix-oxygen";
+import type { BlogQuery } from "storefront-api.generated";
+import invariant from "tiny-invariant";
+import { routeHeaders } from "~/utils/cache";
+import { PAGINATION_SIZE } from "~/utils/const";
+import { seoPayload } from "~/utils/seo.server";
+import { WeaverseContent } from "~/weaverse";
+import { redirectIfHandleIsLocalized } from "~/utils/redirect";
+
+export let headers = routeHeaders;
+
+export let loader = async (args: LoaderFunctionArgs) => {
+  let { params, request, context } = args;
+  let storefront = context.storefront;
+  let { language, country } = storefront.i18n;
+
+  invariant(params.blogHandle, "Missing blog handle");
+
+  // Load blog data and weaverseData in parallel
+  let [{ blog }, weaverseData] = await Promise.all([
+    storefront.query<BlogQuery>(BLOGS_QUERY, {
+      variables: {
+        blogHandle: params.blogHandle,
+        pageBy: PAGINATION_SIZE,
+        language,
+      },
+    }),
+    context.weaverse.loadPage({
+      type: "BLOG",
+      handle: params.blogHandle,
+    }),
+  ]);
+
+  if (!blog?.articles) {
+    throw new Response("Not found", { status: 404 });
+  }
+  redirectIfHandleIsLocalized(request, { handle: params.blogHandle, data: blog });
+
+  let articles = flattenConnection(blog.articles).map((article) => {
+    let { publishedAt } = article;
+    return {
+      ...article,
+      publishedAt: new Intl.DateTimeFormat(`${language}-${country}`, {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      }).format(new Date(publishedAt)),
+    };
+  });
+
+  let seo = seoPayload.blog({ blog, url: request.url });
+
+  return data({
+    blog,
+    articles,
+    seo,
+    weaverseData,
+  });
+};
+
+export let meta: MetaFunction<typeof loader> = ({ data }) => {
+  return getSeoMeta(data?.seo as SeoConfig);
+};
+
+export default function Blogs() {
+  return <WeaverseContent />;
+}
+
+const BLOGS_QUERY = `#graphql
+  query blog(
+    $language: LanguageCode
+    $blogHandle: String!
+    $pageBy: Int!
+    $cursor: String
+  ) @inContext(language: $language) {
+    blog(handle: $blogHandle) {
+      title
+      handle
+      seo {
+        title
+        description
+      }
+      articles(first: $pageBy, after: $cursor) {
+        edges {
+          node {
+            ...Article
+          }
+        }
+      }
+    }
+  }
+
+  fragment Article on Article {
+    author: authorV2 {
+      name
+    }
+    contentHtml
+    excerpt
+    excerptHtml
+    handle
+    id
+    image {
+      id
+      altText
+      url
+      width
+      height
+    }
+    publishedAt
+    title
+  }
+` as const;
